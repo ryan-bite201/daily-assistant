@@ -5,10 +5,15 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <!-- Everything is inlined into this one file at build time, so the policy
          allows inline script/style and blocks every external origin. connect-src
-         stays open to https: for the Gist sync and calendar relay added later. -->
+         stays open to https: for the Gist sync and calendar relay added later.
+         worker-src 'self' is the one addition beyond that — it permits
+         registering sw.js (offline caching, see public/sw.js) as a same-origin
+         service worker; script-src is deliberately left at 'unsafe-inline'
+         only, since nothing else the app does needs a separately-loaded
+         script file. -->
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data: blob:; font-src data:; connect-src 'self' https:; base-uri 'none'; form-action 'none';"
+      content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data: blob:; font-src data:; connect-src 'self' https:; worker-src 'self'; base-uri 'none'; form-action 'none';"
     />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
@@ -430,5 +435,24 @@ Error generating stack: `+i.message+`
   </head>
   <body>
     <div id="root"></div>
+    <!-- Plain inline script, not inside the module bundle above — this must
+         survive completely untouched by vite-plugin-singlefile's inlining
+         pass (it already is inline, so there's nothing for that plugin to
+         do), and must run independently of the React app's own lifecycle.
+         Registering sw.js is what makes offline loading work at all after
+         iOS fully kills the app's process; see public/sw.js. -->
+    <script>
+      if ('serviceWorker' in navigator) {
+        window.addEventListener('load', () => {
+          navigator.serviceWorker.register('./sw.js').catch(() => {
+            // No connection, or some other registration failure — the app
+            // still loaded fine just now (this script only runs after a
+            // successful load), so this is silently skipped rather than
+            // shown to the user. It retries automatically on the next
+            // successful load.
+          });
+        });
+      }
+    </script>
   </body>
 </html>
