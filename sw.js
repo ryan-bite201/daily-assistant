@@ -1,24 +1,33 @@
-// Offline fallback for the single-file app shell (added post-Phase-8, per
-// Ryan's request — worried about zero-signal access after iOS fully kills
-// the home-screen app's process). This is the one deliberate, narrow
-// exception to CLAUDE.md's "one output file" rule: a service worker cannot
-// be registered from anything inline in the HTML document itself (browsers
-// require a real, separately-fetchable same-origin URL for this — the
-// original spec's own §5 already noted the same restriction when explaining
-// why push notifications weren't feasible), so guaranteed offline loading
-// genuinely requires a second file. Its only job is caching
-// daily-assistant.html; nothing else about the deploy process changes —
-// Ryan still just drags the one HTML file in, this sits in the repo
-// untouched.
+// Service worker for the single-file app shell. One of the two deliberate,
+// narrow exceptions to CLAUDE.md's "one output file" rule (manifest.webmanifest
+// is the other): a service worker cannot be registered from anything inline in
+// the HTML document itself — browsers require a real, separately-fetchable
+// same-origin URL — so both offline loading and Web Push genuinely require a
+// second file. Nothing about the deploy process changes beyond the file count:
+// Ryan drags daily-assistant.html + sw.js + manifest.webmanifest in, all three
+// sit in the repo untouched.
 //
-// Network-first, not cache-first: whenever there's any connectivity at all,
-// this always fetches (and re-caches) the current deployed version, so a
-// future update is visible on the very next open rather than lagging a
-// version behind the way cache-first-with-background-revalidate would. The
-// cache is purely the fallback for the one scenario this exists for — the
-// fetch failing outright (genuinely no connection) — never a shortcut taken
-// just because a cached copy happens to be sitting there.
-const CACHE_NAME = 'daily-assistant-shell-v1';
+// Two jobs:
+//
+// 1. Offline fallback (added post-Phase-8 — zero-signal access after iOS fully
+//    kills the home-screen app's process). Network-first, not cache-first:
+//    whenever there's any connectivity at all, this always fetches (and
+//    re-caches) the current deployed version, so a future update is visible on
+//    the very next open rather than lagging a version behind the way
+//    cache-first-with-background-revalidate would. The cache is purely the
+//    fallback for the one scenario it exists for — the fetch failing outright
+//    (genuinely no connection) — never a shortcut taken just because a cached
+//    copy happens to be sitting there.
+//
+// 2. Web Push (added later — the original spec's §5 said push "wasn't
+//    feasible" because a home-screen web app had no push transport; iOS 16.4 /
+//    macOS Safari 16.1 changed that). The `push` handler below just renders
+//    whatever the Cloudflare relay Worker (see worker/) sends. The Worker is a
+//    stateless relay: it reads the app's own public .ics feed, holds no app
+//    data, and if it disappears the app falls back cleanly to its in-app
+//    DeadlineReminders banners. This file never talks to the Worker directly —
+//    NotificationSettings.jsx registers the subscription, the Worker pushes.
+const CACHE_NAME = 'daily-assistant-shell-v2';
 const SHELL_URL = 'daily-assistant.html';
 
 self.addEventListener('install', (event) => {
@@ -63,5 +72,47 @@ self.addEventListener('fetch', (event) => {
           })
         );
       })
+  );
+});
+
+// --- Web Push -------------------------------------------------------------
+// The relay Worker sends a JSON body: { title, body, tag, url }. Everything
+// is defensively defaulted — a malformed or bodyless push still shows
+// something rather than throwing inside the event and being dropped silently.
+// `tag` collapses repeats of the same reminder into one banner instead of
+// stacking; the Worker sets it per feed VEVENT UID.
+self.addEventListener('push', (event) => {
+  let payload = {};
+  try {
+    payload = event.data ? event.data.json() : {};
+  } catch {
+    payload = { body: event.data && event.data.text ? event.data.text() : '' };
+  }
+
+  const title = payload.title || 'Daily Assistant';
+  const options = {
+    body: payload.body || 'You have a reminder.',
+    tag: payload.tag || 'daily-assistant-reminder',
+    renotify: true,
+    data: { url: payload.url || './daily-assistant.html' },
+  };
+
+  event.waitUntil(self.registration.showNotification(title, options));
+});
+
+// Tap the banner -> focus the already-open app if there is one, otherwise
+// open it. Matches against the shell URL loosely (startsWith) because the
+// home-screen launch and a browser tab can differ in query/hash.
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  const target = (event.notification.data && event.notification.data.url) || './daily-assistant.html';
+
+  event.waitUntil(
+    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clientList) => {
+      for (const client of clientList) {
+        if (client.url.includes('daily-assistant') && 'focus' in client) return client.focus();
+      }
+      return self.clients.openWindow(target);
+    })
   );
 });
